@@ -10,16 +10,12 @@ type ChatMessage = {
   image?: string;
 };
 
-// Backend API query function (now calls internal API route with FormData)
-async function queryWithImage(data: { question: string; imageFile?: File | null }) {
-  const formData = new FormData();
-  formData.append('question', data.question);
-  if (data.imageFile) {
-    formData.append('image', data.imageFile);
-  }
+// Backend API query function (calls internal API route, text only)
+async function query(data: { question: string }) {
   const response = await fetch("/api/chatbot", {
     method: "POST",
-    body: formData,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
   });
   const result = await response.json();
   return result;
@@ -42,8 +38,6 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [isFullScreen, setIsFullScreen] = useState(false);
-  const [imageFile, setImageFile] = useState<File | null>(null);
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Scroll to bottom on new message
@@ -54,15 +48,10 @@ export default function Home() {
   // Handle sending a message
   async function handleSend(e: React.FormEvent) {
     e.preventDefault();
-    if ((!input.trim() && !imageFile) || loading) return;
-    // Show user message immediately
-    setMessages((msgs) => [
-      ...msgs,
-      { sender: "user", text: input, image: imagePreview || undefined },
-    ]);
+    if (!input.trim() || loading) return;
+    const userMsg = { sender: "user", text: input };
+    setMessages((msgs) => [...msgs, userMsg]);
     setInput("");
-    setImageFile(null);
-    setImagePreview(null);
     setLoading(true);
     // Show loading indicator (spinner placeholder)
     setMessages((msgs) => [
@@ -70,7 +59,7 @@ export default function Home() {
       { sender: "bot", text: "__spinner__" },
     ]);
     try {
-      const response = await queryWithImage({ question: input, imageFile });
+      const response = await query({ question: userMsg.text });
       setMessages((msgs) => [
         ...msgs.slice(0, -1),
         { sender: "bot", text: response.text || "Sorry, I didn't understand that." },
@@ -85,14 +74,16 @@ export default function Home() {
     }
   }
 
-  // Handle image upload
+  // Handle image upload (local preview only)
   function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    setImageFile(file);
     const reader = new FileReader();
     reader.onload = (event) => {
-      setImagePreview(event.target?.result as string);
+      setMessages((msgs) => [
+        ...msgs,
+        { sender: "user", text: "", image: event.target?.result as string },
+      ]);
     };
     reader.readAsDataURL(file);
     e.target.value = "";
@@ -201,9 +192,6 @@ export default function Home() {
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 15V3" />
                 </svg>
               </label>
-              {imagePreview && (
-                <Image src={imagePreview} alt="Preview" className="rounded-lg max-w-[60px] max-h-[60px]" width={60} height={60} />
-              )}
               <input
                 type="text"
                 placeholder="Type your message..."
@@ -216,7 +204,7 @@ export default function Home() {
               <button
                 type="submit"
                 className="px-6 py-2 rounded-full bg-blue-700 text-white font-semibold hover:bg-blue-800 transition disabled:opacity-60"
-                disabled={(!input.trim() && !imageFile) || loading}
+                disabled={!input.trim() || loading}
               >
                 {loading ? <Spinner /> : "Send"}
               </button>
