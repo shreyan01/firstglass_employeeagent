@@ -1,36 +1,101 @@
 'use client'
+import Image from 'next/image'
 import { useState, useRef, useEffect } from "react";
+import ReactMarkdown from 'react-markdown';
+
+// Message type
+type ChatMessage = {
+  sender: string;
+  text: string;
+  image?: string;
+};
+
+// Backend API query function (now calls internal API route with FormData)
+async function queryWithImage(data: { question: string; imageFile?: File | null }) {
+  const formData = new FormData();
+  formData.append('question', data.question);
+  if (data.imageFile) {
+    formData.append('image', data.imageFile);
+  }
+  const response = await fetch("/api/chatbot", {
+    method: "POST",
+    body: formData,
+  });
+  const result = await response.json();
+  return result;
+}
+
+// Spinner component
+function Spinner() {
+  return (
+    <span className="inline-block align-middle">
+      <span className="w-5 h-5 border-2 border-blue-300 border-t-blue-600 rounded-full animate-spin inline-block"></span>
+    </span>
+  );
+}
 
 export default function Home() {
   // Chatbot state
-  const [messages, setMessages] = useState([
+  const [messages, setMessages] = useState<ChatMessage[]>([
     { sender: "bot", text: "Hi! How can I help you today?" },
   ]);
   const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [isFullScreen, setIsFullScreen] = useState(false);
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Scroll to bottom on new message
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, loading, isFullScreen]);
 
   // Handle sending a message
-  function handleSend(e: React.FormEvent) {
+  async function handleSend(e: React.FormEvent) {
     e.preventDefault();
-    if (!input.trim()) return;
-    const userMsg = { sender: "user", text: input };
-    setMessages((msgs) => [...msgs, userMsg]);
+    if ((!input.trim() && !imageFile) || loading) return;
+    // Show user message immediately
+    setMessages((msgs) => [
+      ...msgs,
+      { sender: "user", text: input, image: imagePreview || undefined },
+    ]);
     setInput("");
-    // Simulate bot reply
-    setTimeout(() => {
+    setImageFile(null);
+    setImagePreview(null);
+    setLoading(true);
+    // Show loading indicator (spinner placeholder)
+    setMessages((msgs) => [
+      ...msgs,
+      { sender: "bot", text: "__spinner__" },
+    ]);
+    try {
+      const response = await queryWithImage({ question: input, imageFile });
       setMessages((msgs) => [
-        ...msgs,
-        {
-          sender: "bot",
-          text: "Thanks for your message! (This is a demo bot.)",
-        },
+        ...msgs.slice(0, -1),
+        { sender: "bot", text: response.text || "Sorry, I didn't understand that." },
       ]);
-    }, 700);
+    } catch (err) {
+      setMessages((msgs) => [
+        ...msgs.slice(0, -1),
+        { sender: "bot", text: "Sorry, there was an error. Please try again." + err },
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Handle image upload
+  function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImageFile(file);
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      setImagePreview(event.target?.result as string);
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
   }
 
   return (
@@ -39,9 +104,7 @@ export default function Home() {
       <header className="w-full flex items-center justify-between px-8 py-6 bg-transparent">
         <div className="flex items-center gap-3">
           {/* Placeholder logo */}
-          <div className="w-10 h-10 bg-blue-200 rounded-full flex items-center justify-center">
-            <span className="text-2xl font-bold text-blue-700">F</span>
-          </div>
+          <Image src="/logo.png" alt="First Glass of Arkansas" width={30} height={30} />
           <span className="text-xl font-bold text-blue-900 tracking-tight">First Glass of Arkansas</span>
         </div>
         <nav className="hidden md:flex gap-8 text-blue-900 font-medium text-base">
@@ -58,7 +121,33 @@ export default function Home() {
 
       {/* Main Section */}
       <main className="flex-1 flex flex-col items-center justify-center px-4 pb-12">
-        <div className="w-full max-w-4xl bg-white rounded-3xl shadow-md py-14 px-6 sm:px-16 flex flex-col items-center relative">
+        <div
+          className={
+            `w-full max-w-4xl bg-white rounded-3xl shadow-md py-14 px-6 sm:px-16 flex flex-col items-center relative transition-all duration-300 z-10 ` +
+            (isFullScreen ? 'fixed top-0 left-0 w-screen h-screen max-w-none max-h-none py-4 px-2 sm:px-8 justify-center items-center' : '')
+          }
+          style={isFullScreen ? { minHeight: '100vh' } : {}}
+        >
+          {/* Expand/Collapse Button */}
+          <button
+            className="absolute top-4 right-4 z-20 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-full p-2 shadow-md focus:outline-none"
+            onClick={() => setIsFullScreen(f => !f)}
+            aria-label={isFullScreen ? 'Collapse Chatbot' : 'Expand Chatbot'}
+            type="button"
+          >
+            {isFullScreen ? (
+              // Collapse icon
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19h4v-4m0 4l-6-6m-4-4V5h4m-4 0l6 6" />
+              </svg>
+            ) : (
+              // Expand icon
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 9V5h-4m4 0l-6 6m-4 4H5v4m0-4l6-6" />
+              </svg>
+            )}
+          </button>
+
           {/* Headline */}
           <div className="flex flex-col items-center mb-8">
             <span className="inline-block bg-blue-100 text-blue-700 text-xs font-semibold rounded-full px-4 py-1 mb-4">Internal Employee Chatbot</span>
@@ -67,25 +156,54 @@ export default function Home() {
           </div>
 
           {/* Chatbot UI */}
-          <div className="w-full max-w-xl bg-[#f6fafd] rounded-2xl border border-blue-100 shadow-inner p-6 flex flex-col gap-4 min-h-[340px] mb-8">
+          <div className={
+            'w-full max-w-xl bg-[#f6fafd] rounded-2xl border border-blue-100 shadow-inner p-6 flex flex-col gap-4 min-h-[340px] mb-8 ' +
+            (isFullScreen ? 'h-[70vh] max-h-[70vh]' : '')
+          }>
             {/* Chat bubbles */}
-            <div className="flex-1 flex flex-col gap-2 overflow-y-auto max-h-64 scrollbar-thin pr-1">
+            <div className={
+              'flex-1 flex flex-col gap-2 overflow-y-auto max-h-64 scrollbar-thin pr-1 ' +
+              (isFullScreen ? 'max-h-[55vh]' : '')
+            }>
               {messages.map((msg, idx) => (
                 <div
                   key={idx}
                   className={
                     msg.sender === "user"
                       ? "self-end bg-blue-700 text-white rounded-xl px-4 py-2 max-w-[80%]"
-                      : "self-start bg-blue-100 text-blue-900 rounded-xl px-4 py-2 max-w-[80%]"
+                      : "self-start bg-blue-100 text-blue-900 rounded-xl px-4 py-2 max-w-[80%] prose prose-blue prose-sm"
                   }
                 >
-                  {msg.text}
+                  {msg.image ? (
+                    <Image src={msg.image} alt="Uploaded" className="rounded-lg max-w-xs max-h-60" width={300} height={200} />
+                  ) : msg.text === "__spinner__"
+                    ? <Spinner />
+                    : msg.sender === "bot"
+                      ? <ReactMarkdown>{msg.text}</ReactMarkdown>
+                      : msg.text}
                 </div>
               ))}
               <div ref={chatEndRef} />
             </div>
             {/* Input area */}
-            <form className="flex gap-2 mt-4" onSubmit={handleSend} autoComplete="off">
+            <form className="flex gap-2 mt-4 items-center" onSubmit={handleSend} autoComplete="off">
+              {/* Image upload button */}
+              <label className="cursor-pointer bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-full p-2 flex items-center" title="Upload image">
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={handleImageUpload}
+                  disabled={loading}
+                />
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5V19a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-2.5M7 10l5 5 5-5" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 15V3" />
+                </svg>
+              </label>
+              {imagePreview && (
+                <Image src={imagePreview} alt="Preview" className="rounded-lg max-w-[60px] max-h-[60px]" width={60} height={60} />
+              )}
               <input
                 type="text"
                 placeholder="Type your message..."
@@ -93,13 +211,14 @@ export default function Home() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 autoFocus
+                disabled={loading}
               />
               <button
                 type="submit"
                 className="px-6 py-2 rounded-full bg-blue-700 text-white font-semibold hover:bg-blue-800 transition disabled:opacity-60"
-                disabled={!input.trim()}
+                disabled={(!input.trim() && !imageFile) || loading}
               >
-                Send
+                {loading ? <Spinner /> : "Send"}
               </button>
             </form>
           </div>
