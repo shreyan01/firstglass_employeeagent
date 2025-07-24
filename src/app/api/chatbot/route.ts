@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-const FLOWISE_API_KEY=process.env.FLOWISE_API_KEY;
 export async function POST(req: NextRequest) {
   try {
     const { question } = await req.json();
@@ -7,7 +6,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Missing question' }, { status: 400 });
     }
     const flowiseRes = await fetch(
-      `https://cloud.flowiseai.com/api/v1/prediction/${FLOWISE_API_KEY}`,
+      `https://cloud.flowiseai.com/api/v1/prediction/264789ca-a06c-4c37-8805-1630ebffe9d7`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
