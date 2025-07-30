@@ -217,7 +217,7 @@ export default function Home() {
               ...chat,
               messages: [
                 ...chat.messages.slice(0, -1),
-                { sender: "bot", text: response.text || "Sorry, I didn't understand that." },
+                { sender: "bot", text: response.text  },
               ],
             }
           : chat
