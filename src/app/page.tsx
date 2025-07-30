@@ -18,10 +18,11 @@ import type { User as SupabaseUser } from '@supabase/supabase-js';
    title: string;
    created: number;
    messages: ChatMessage[];
+   threadId?: string; // OpenAI thread ID
  };
 
 // Backend API query function (calls internal API route, text only)
-async function query(data: { question: string }) {
+async function query(data: { question: string; threadId?: string }) {
   const response = await fetch("/api/chatbot", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -210,11 +211,12 @@ export default function Home() {
         : chat
     ));
     try {
-      const response = await query({ question: userMsg.text });
+      const response = await query({ question: userMsg.text, threadId: activeChat.threadId });
       setChats((prev) => prev.map(chat =>
         chat.id === activeChatId
           ? {
               ...chat,
+              threadId: response.threadId, // Store the thread ID
               messages: [
                 ...chat.messages.slice(0, -1),
                 { sender: "bot", text: response.text || "Sorry, I didn't understand that." },
