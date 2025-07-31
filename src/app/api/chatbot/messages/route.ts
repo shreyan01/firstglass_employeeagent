@@ -35,7 +35,10 @@ export async function POST(req: NextRequest) {
       id: msg.id
     }));
 
-    return NextResponse.json({ messages });
+    // Reverse the messages to show them in chronological order (oldest first)
+    const reversedMessages = messages.reverse();
+
+    return NextResponse.json({ messages: reversedMessages });
 
   } catch (err) {
     console.error('Error loading messages from thread:', err);
