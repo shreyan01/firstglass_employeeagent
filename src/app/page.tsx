@@ -1,7 +1,7 @@
 'use client'
 import Image from 'next/image';
 import { useState, useRef, useEffect } from "react";
-import ReactMarkdown from 'react-markdown';
+
 import { FcGoogle } from 'react-icons/fc';
 import { supabase } from './supabaseClient';
 import type { User as SupabaseUser } from '@supabase/supabase-js';
@@ -11,15 +11,16 @@ import type { User as SupabaseUser } from '@supabase/supabase-js';
    sender: string;
    text: string;
    image?: string;
+   id?: string; // Added for typing animation
  };
 
- type ChatSession = {
-   id: string;
-   title: string;
-   created: number;
-   messages: ChatMessage[];
-   threadId?: string; // OpenAI thread ID
- };
+// Simplified chat storage using OpenAI threads
+type ChatSession = {
+  id: string;
+  title: string;
+  created: number;
+  threadId?: string; // OpenAI thread ID - this is our primary storage
+};
 
 // Backend API query function (calls internal API route, text only)
 async function query(data: { question: string; threadId?: string }) {
@@ -159,6 +160,208 @@ function AuthModal({ open, onClose, initialTab = 'signin', setUser }: { open: bo
   );
 }
 
+// Typing dots animation component
+function TypingDots() {
+  return (
+    <div className="flex space-x-1">
+      <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"></div>
+      <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+      <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+    </div>
+  );
+}
+
+// Typewriter text component
+function TypewriterText({ text, onComplete }: { text: string; onComplete?: () => void }) {
+  const [displayedText, setDisplayedText] = useState('');
+  const [currentIndex, setCurrentIndex] = useState(0);
+
+  useEffect(() => {
+    if (currentIndex < text.length) {
+      const timer = setTimeout(() => {
+        setDisplayedText(prev => prev + text[currentIndex]);
+        setCurrentIndex(prev => prev + 1);
+      }, 15); // Speed of typing (faster)
+
+      return () => clearTimeout(timer);
+    } else if (onComplete) {
+      onComplete();
+    }
+  }, [currentIndex, text, onComplete]);
+
+  return <span>{displayedText}</span>;
+}
+
+// Citation component
+function CitationButton({ citation }: { citation: string }) {
+  return (
+    <span className="inline-block relative group">
+      <button className="inline-flex items-center justify-center w-5 h-5 bg-blue-100 text-blue-700 rounded-full text-xs font-semibold hover:bg-blue-200 transition-all duration-200 group-hover:scale-110">
+        📄
+      </button>
+      <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-800 text-white text-sm rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-50">
+        {citation}
+        <div className="absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-800"></div>
+      </div>
+    </span>
+  );
+}
+
+// Function to process text and extract citations
+function processTextWithCitations(text: string) {
+  // Split text by citation pattern
+  const parts = text.split(/(【[^】]+】)/);
+  
+  return parts.map((part, index) => {
+    if (part.match(/^【[^】]+】$/)) {
+      // This is a citation
+      const citation = part.slice(1, -1); // Remove 【】
+      return <CitationButton key={index} citation={citation} />;
+    } else {
+      // This is regular text
+      return part;
+    }
+  });
+}
+
+// Auto-title generation function
+async function generateChatTitle(firstMessage: string): Promise<string> {
+  try {
+    // Clean the message
+    let cleanedMessage = firstMessage.trim();
+    
+    // Strip common greetings
+    const greetings = [
+      'hey', 'hello', 'hi', 'good morning', 'good afternoon', 'good evening',
+      'greetings', 'howdy', 'yo', 'what\'s up', 'sup', 'good day'
+    ];
+    
+    for (const greeting of greetings) {
+      const regex = new RegExp(`^${greeting}[!?.,]*\\s*`, 'i');
+      cleanedMessage = cleanedMessage.replace(regex, '');
+    }
+    
+    // Remove filler words
+    const fillerWords = [
+      'um', 'uh', 'like', 'you know', 'basically', 'actually', 'literally',
+      'kind of', 'sort of', 'i think', 'i guess', 'maybe', 'probably'
+    ];
+    
+    for (const filler of fillerWords) {
+      const regex = new RegExp(`\\b${filler}\\b`, 'gi');
+      cleanedMessage = cleanedMessage.replace(regex, '');
+    }
+    
+    // Clean up extra spaces
+    cleanedMessage = cleanedMessage.replace(/\s+/g, ' ').trim();
+    
+    // If message is empty after cleaning, return default
+    if (!cleanedMessage) {
+      return 'New Chat';
+    }
+    
+    // Use first sentence (up to 50 characters)
+    let title = cleanedMessage.split(/[.!?]/)[0].trim();
+    
+    // If still too long, truncate to 30 characters
+    if (title.length > 30) {
+      title = title.substring(0, 30) + '...';
+    }
+    
+    return title || 'New Chat';
+  } catch (error) {
+    console.error('Error generating title:', error);
+    return 'New Chat';
+  }
+}
+
+// Simplified chat storage using OpenAI threads
+async function loadUserChats(userId: string): Promise<ChatSession[]> {
+  try {
+    console.log('Loading chats for user:', userId);
+    
+    // For now, use localStorage for chat metadata
+    // In production, you might want to store just the metadata in Supabase
+    const storedChats = localStorage.getItem(`chats_${userId}`);
+    
+    if (!storedChats) {
+      console.log('No stored chats found, creating default chat');
+      const defaultChat: ChatSession = {
+        id: Date.now().toString(),
+        title: 'New Chat',
+        created: Date.now(),
+      };
+      return [defaultChat];
+    }
+
+    const chats: ChatSession[] = JSON.parse(storedChats);
+    console.log('Loaded chats from localStorage:', chats);
+    return chats;
+  } catch (error) {
+    console.error('Error loading chats:', error);
+    return [{
+      id: Date.now().toString(),
+      title: 'New Chat',
+      created: Date.now(),
+    }];
+  }
+}
+
+async function saveChatToDatabase(chat: ChatSession, userId: string) {
+  try {
+    console.log('Saving chat metadata:', {
+      chatId: chat.id,
+      userId: userId,
+      title: chat.title,
+      threadId: chat.threadId
+    });
+    
+    // Store only metadata in localStorage
+    // The actual messages are stored in OpenAI threads
+    const storedChats = localStorage.getItem(`chats_${userId}`);
+    const chats: ChatSession[] = storedChats ? JSON.parse(storedChats) : [];
+    
+    const existingIndex = chats.findIndex(c => c.id === chat.id);
+    if (existingIndex >= 0) {
+      chats[existingIndex] = chat;
+    } else {
+      chats.push(chat);
+    }
+    
+    localStorage.setItem(`chats_${userId}`, JSON.stringify(chats));
+    console.log('Chat metadata saved successfully');
+  } catch (error) {
+    console.error('Error saving chat metadata:', error);
+    throw error;
+  }
+}
+
+// Load messages from OpenAI thread
+async function loadMessagesFromThread(threadId: string): Promise<ChatMessage[]> {
+  try {
+    console.log('Loading messages from OpenAI thread:', threadId);
+    
+    const response = await fetch('/api/chatbot/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ threadId }),
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to load messages from thread');
+    }
+
+    const data = await response.json();
+    console.log('Loaded messages from thread:', data.messages);
+    return data.messages;
+  } catch (error) {
+    console.error('Error loading messages from thread:', error);
+    return [{ sender: "bot", text: "Hi! How can I help you today?" }];
+  }
+}
+
 export default function Home() {
   // Chat state
   const [chats, setChats] = useState<ChatSession[]>(() => [
@@ -166,76 +369,107 @@ export default function Home() {
       id: Date.now().toString(),
       title: 'New Chat',
       created: Date.now(),
-      messages: [
-        { sender: "bot", text: "Hi! How can I help you today?" },
-      ],
     },
   ]);
   const [activeChatId, setActiveChatId] = useState(chats[0].id);
+  const [currentMessages, setCurrentMessages] = useState<ChatMessage[]>([
+    { sender: "bot", text: "Hi! How can I help you today?" }
+  ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const [authModalOpen, setAuthModalOpen] = useState<false | 'signin' | 'signup'>(false);
   const [user, setUser] = useState<SupabaseUser | null>(null);
+  const [typingMessages, setTypingMessages] = useState<Set<string>>(new Set());
+  const [skipTypingAnimation] = useState(false);
 
   // Get active chat
   const activeChat = chats.find((c) => c.id === activeChatId)!;
 
+  // Load messages when switching chats
+  useEffect(() => {
+    if (activeChat?.threadId) {
+      loadMessagesFromThread(activeChat.threadId).then(messages => {
+        setCurrentMessages(messages);
+      });
+    } else {
+      setCurrentMessages([{ sender: "bot", text: "Hi! How can I help you today?" }]);
+    }
+  }, [activeChatId, activeChat?.threadId]);
+
   // Scroll to bottom on new message
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activeChat.messages, loading]);
+  }, [currentMessages, loading]);
 
   // Handle sending a message
   async function handleSend(e: React.FormEvent) {
     e.preventDefault();
+    // Reactivate auth
     if (!user) {
       setAuthModalOpen('signin');
       return;
     }
     if (!input.trim() || loading) return;
     const userMsg: ChatMessage = { sender: "user", text: input };
+    
+    // Check if this is the first user message (auto-title)
+    const isFirstUserMessage = currentMessages.filter(msg => msg.sender === 'user').length === 0;
+    
     // Add user message
-    setChats((prev) => prev.map(chat =>
-      chat.id === activeChatId
-        ? { ...chat, messages: [...chat.messages, userMsg] }
-        : chat
-    ));
+    setCurrentMessages(prev => [...prev, userMsg]);
     setInput("");
     setLoading(true);
-    // Add loading indicator
-    setChats((prev) => prev.map(chat =>
-      chat.id === activeChatId
-        ? { ...chat, messages: [...chat.messages, { sender: "bot", text: "__spinner__" }] }
-        : chat
-    ));
+    
+    // Generate title if this is the first user message
+    if (isFirstUserMessage) {
+      const newTitle = await generateChatTitle(input);
+      setChats((prev) => prev.map(chat =>
+        chat.id === activeChatId
+          ? { ...chat, title: newTitle }
+          : chat
+      ));
+    }
+    
+    // Add loading indicator with typing dots
+    const loadingMessageId = `${activeChatId}-${Date.now()}`;
+    setTypingMessages(prev => new Set(prev).add(loadingMessageId));
+    setCurrentMessages(prev => [...prev, { sender: "bot", text: "__typing__", id: loadingMessageId }]);
+    
     try {
       const response = await query({ question: userMsg.text, threadId: activeChat.threadId });
-      setChats((prev) => prev.map(chat =>
-        chat.id === activeChatId
-          ? {
-              ...chat,
-              threadId: response.threadId, // Store the thread ID
-              messages: [
-                ...chat.messages.slice(0, -1),
-                { sender: "bot", text: response.text || "Sorry, I didn't understand that." },
-              ],
-            }
-          : chat
-      ));
+      
+      // Update chat with thread ID if this is the first message
+      if (!activeChat.threadId) {
+        setChats((prev) => prev.map(chat =>
+          chat.id === activeChatId
+            ? { ...chat, threadId: response.threadId }
+            : chat
+        ));
+      }
+      
+      setCurrentMessages(prev => [
+        ...prev.slice(0, -1),
+        { sender: "bot", text: response.text || "Sorry, I didn't understand that.", id: loadingMessageId },
+      ]);
+      
+      // Start typing animation
+      setTypingMessages(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(loadingMessageId);
+        return newSet;
+      });
     } catch (err) {
-      setChats((prev) => prev.map(chat =>
-        chat.id === activeChatId
-          ? {
-              ...chat,
-              messages: [
-                ...chat.messages.slice(0, -1),
-                { sender: "bot", text: "Sorry, there was an error. Please try again." + err },
-              ],
-            }
-          : chat
-      ));
+      setCurrentMessages(prev => [
+        ...prev.slice(0, -1),
+        { sender: "bot", text: "Sorry, there was an error. Please try again." + err, id: loadingMessageId },
+      ]);
+      setTypingMessages(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(loadingMessageId);
+        return newSet;
+      });
     } finally {
       setLoading(false);
     }
@@ -243,25 +477,16 @@ export default function Home() {
 
   // Handle image upload (local preview only)
   function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    if (!user) {
-      setAuthModalOpen('signin');
-      return;
-    }
+    // Temporarily disabled auth
+    // if (!user) {
+    //   setAuthModalOpen('signin');
+    //   return;
+    // }
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (event) => {
-      setChats((prev) => prev.map(chat =>
-        chat.id === activeChatId
-          ? {
-              ...chat,
-              messages: [
-                ...chat.messages,
-                { sender: "user", text: "", image: event.target?.result as string },
-              ],
-            }
-          : chat
-      ));
+      setCurrentMessages(prev => [...prev, { sender: "user", text: "", image: event.target?.result as string }]);
     };
     reader.readAsDataURL(file);
     e.target.value = "";
@@ -274,14 +499,37 @@ export default function Home() {
       id: newId,
       title: 'New Chat',
       created: Date.now(),
-      messages: [
-        { sender: "bot", text: "Hi! How can I help you today?" },
-      ],
     };
     setChats((prev) => [newChat, ...prev]);
     setActiveChatId(newId);
     setSidebarOpen(false);
   }
+
+  // Load user chats when user logs in
+  useEffect(() => {
+    if (user) {
+      console.log('Loading chats for user:', user.id);
+      loadUserChats(user.id).then(loadedChats => {
+        console.log('Loaded chats:', loadedChats);
+        setChats(loadedChats);
+        if (loadedChats.length > 0) {
+          setActiveChatId(loadedChats[0].id);
+        }
+      }).catch(error => {
+        console.error('Error loading chats:', error);
+      });
+    }
+  }, [user]);
+
+  // Save chat when messages change
+  useEffect(() => {
+    if (user && activeChat) {
+      console.log('Saving chat to database:', activeChat.id, 'for user:', user.id);
+      saveChatToDatabase(activeChat, user.id).catch(error => {
+        console.error('Error saving chat:', error);
+      });
+    }
+  }, [activeChat, user]);
 
   // Sidebar width
   const sidebarWidth = 270;
@@ -338,7 +586,11 @@ export default function Home() {
             </button>
           ))}
         </div>
-        <div className="p-4 border-t border-blue-100 text-xs text-blue-400">© {new Date().getFullYear()} First Glass of Arkansas</div>
+        <div className="p-4 border-t border-blue-100 text-xs text-blue-400">
+          {new Date().getFullYear()} First Glass of Arkansas
+          <br />
+          Powered by <a href="https://longspan.ai" target="_blank" rel="noopener noreferrer" className="text-blue-700 underline"><b>Longspan</b></a>
+        </div>
       </aside>
 
       {/* Main Chat Area */}
@@ -357,6 +609,7 @@ export default function Home() {
             <span className="text-xl font-bold text-blue-900 tracking-tight">First Glass of Arkansas</span>
           </div>
           <div className="flex gap-3">
+            {/* Temporarily disabled auth buttons */}
             {user ? (
               <button className="px-5 py-2 rounded-full bg-blue-100 text-blue-700 border border-blue-200 font-semibold hover:bg-blue-200 transition" onClick={async () => { await supabase.auth.signOut(); setUser(null); }}>Sign Out</button>
             ) : (
@@ -371,7 +624,7 @@ export default function Home() {
         {/* Chat messages */}
         <div className="flex-1 overflow-y-auto bg-[#f6fafd] px-0 sm:px-0 py-6">
           <div className="max-w-2xl mx-auto flex flex-col gap-4">
-            {activeChat.messages.map((msg, idx) => (
+            {currentMessages.map((msg, idx) => (
               <div
                 key={idx}
                 className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}
@@ -387,9 +640,22 @@ export default function Home() {
                     <Image src={msg.image} alt="Uploaded" className="rounded-lg max-w-xs max-h-60" width={300} height={200} />
                   ) : msg.text === "__spinner__"
                     ? <Spinner />
+                    : msg.text === "__typing__"
+                    ? <TypingDots />
+                    : msg.sender === "bot" && typingMessages.has(msg.id || '')
+                    ? <TypewriterText 
+                        text={msg.text} 
+                        onComplete={() => setTypingMessages(prev => {
+                          const newSet = new Set(prev);
+                          newSet.delete(msg.id || '');
+                          return newSet;
+                        })}
+                      />
+                    : msg.sender === "bot" && skipTypingAnimation
+                    ? <div className="whitespace-pre-wrap">{processTextWithCitations(msg.text)}</div>
                     : msg.sender === "bot"
-                      ? <ReactMarkdown>{msg.text}</ReactMarkdown>
-                      : msg.text}
+                    ? <div className="whitespace-pre-wrap">{processTextWithCitations(msg.text)}</div>
+                    : msg.text}
                 </div>
               </div>
             ))}
@@ -404,13 +670,23 @@ export default function Home() {
           autoComplete="off"
         >
           {/* Image upload button */}
-          <label className="cursor-pointer bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-full p-2 flex items-center" title="Upload image">
+          <label 
+            className={`cursor-pointer rounded-full p-2 flex items-center ${user ? 'bg-blue-100 hover:bg-blue-200 text-blue-700' : 'bg-gray-100 text-gray-400'}`} 
+            title={user ? "Upload image" : "Sign in to upload images"}
+            onClick={(e) => {
+              if (!user) {
+                e.preventDefault();
+                setAuthModalOpen('signin');
+                return;
+              }
+            }}
+          >
             <input
               type="file"
               accept="image/*"
               className="hidden"
               onChange={handleImageUpload}
-              disabled={loading}
+              disabled={loading || !user}
             />
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
               <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5V19a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-2.5M7 10l5 5 5-5" />
@@ -419,20 +695,40 @@ export default function Home() {
           </label>
           <input
             type="text"
-            placeholder="Type your message..."
-            className="flex-1 px-4 py-3 rounded-full border border-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-200 bg-white text-blue-900 shadow-sm"
+            placeholder={user ? "Type your message..." : "Sign in to start chatting..."}
+            className={`flex-1 px-4 py-3 rounded-full border focus:outline-none focus:ring-2 shadow-sm ${
+              user 
+                ? 'border-blue-200 focus:ring-blue-200 bg-white text-blue-900' 
+                : 'border-gray-200 focus:ring-gray-200 bg-gray-50 text-gray-500'
+            }`}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             autoFocus
-            disabled={loading}
-            onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter' && !e.shiftKey && !loading) handleSend(e as unknown as React.FormEvent); }}
+            disabled={loading || !user}
+            onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => { 
+              if (e.key === 'Enter' && !e.shiftKey && !loading && user) {
+                handleSend(e as unknown as React.FormEvent);
+              } else if (e.key === 'Enter' && !user) {
+                setAuthModalOpen('signin');
+              }
+            }}
           />
           <button
             type="submit"
-            className="px-6 py-3 rounded-full bg-blue-700 text-white font-semibold hover:bg-blue-800 transition disabled:opacity-60 shadow-md"
-            disabled={!input.trim() || loading}
+            className={`px-6 py-3 rounded-full font-semibold transition shadow-md ${
+              user 
+                ? 'bg-blue-700 text-white hover:bg-blue-800 disabled:opacity-60' 
+                : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+            }`}
+            disabled={!input.trim() || loading || !user}
+            onClick={(e) => {
+              if (!user) {
+                e.preventDefault();
+                setAuthModalOpen('signin');
+              }
+            }}
           >
-            {loading ? <Spinner /> : "Send"}
+            {loading ? <Spinner /> : user ? "Send" : "Sign In"}
           </button>
         </form>
       </div>

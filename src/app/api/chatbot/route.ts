@@ -83,7 +83,7 @@ export async function POST(req: NextRequest) {
     // Poll for completion
     let runStatus = 'queued';
     while (runStatus === 'queued' || runStatus === 'in_progress') {
-      await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
+      await new Promise(resolve => setTimeout(resolve, 500)); // Wait 0.5 seconds (faster)
       
       const statusResponse = await fetch(`https://api.openai.com/v1/threads/${currentThreadId}/runs/${runId}`, {
         headers: {
