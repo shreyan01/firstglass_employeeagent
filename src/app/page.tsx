@@ -25,20 +25,66 @@ type ChatSession = {
   threadId?: string;
 };
 
-// Backend API query function
-async function query(data: { question: string; threadId?: string }) {
-  const response = await fetch("/api/chatbot", {
+// Backend API query function with streaming
+async function queryStream(data: { question: string; threadId?: string }, onMessage: (text: string) => void, onComplete: (threadId: string) => void, onError: (error: string) => void) {
+  console.log('queryStream: Starting request with data:', data);
+  const response = await fetch("/api/chatbot/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
   
+  console.log('queryStream: Response status:', response.status);
+  console.log('queryStream: Response ok:', response.ok);
+  
   if (!response.ok) {
     throw new Error(`HTTP error! status: ${response.status}`);
   }
   
-  const result = await response.json();
-  return result;
+  const reader = response.body?.getReader();
+  const decoder = new TextDecoder();
+  
+  if (!reader) {
+    throw new Error('No response body');
+  }
+  
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      
+      if (done) break;
+      
+      const chunk = decoder.decode(value);
+      console.log('queryStream: Received chunk:', chunk);
+      const lines = chunk.split('\n');
+      
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            
+            switch (data.type) {
+              case 'start':
+                onComplete(data.threadId);
+                break;
+              case 'message':
+                onMessage(data.text);
+                break;
+              case 'done':
+                return;
+              case 'error':
+                onError(data.error);
+                return;
+            }
+          } catch (e) {
+            console.error('Error parsing SSE data:', e);
+          }
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 // Enhanced Spinner component
@@ -209,41 +255,7 @@ function TypingDots() {
   );
 }
 
-// Enhanced Typewriter text component with cursor
-function TypewriterText({ text, onComplete }: { text: string; onComplete?: () => void }) {
-  const [displayedText, setDisplayedText] = useState('');
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [showCursor, setShowCursor] = useState(true);
 
-  useEffect(() => {
-    if (currentIndex < text.length) {
-      const timer = setTimeout(() => {
-        setDisplayedText(prev => prev + text[currentIndex]);
-        setCurrentIndex(prev => prev + 1);
-      }, 20); // Slightly faster typing
-
-      return () => clearTimeout(timer);
-    } else if (onComplete) {
-      setShowCursor(false);
-      onComplete();
-    }
-  }, [currentIndex, text, onComplete]);
-
-  // Cursor blink effect
-  useEffect(() => {
-    const cursorTimer = setInterval(() => {
-      setShowCursor(prev => !prev);
-    }, 500);
-    return () => clearInterval(cursorTimer);
-  }, []);
-
-  return (
-    <span>
-      {displayedText}
-      {showCursor && <span className="inline-block w-0.5 h-4 bg-blue-600 ml-0.5 animate-pulse"></span>}
-    </span>
-  );
-}
 
 // Enhanced Citation component
 function CitationButton({ citation }: { citation: string }) {
@@ -471,7 +483,8 @@ export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [authModalOpen, setAuthModalOpen] = useState<false | 'signin' | 'signup'>(false);
   const [user, setUser] = useState<SupabaseUser | null>(null);
-  const [typingMessages, setTypingMessages] = useState<Set<string>>(new Set());
+  const isCreatingMessage = useRef(false);
+
   const [lastUserMessage, setLastUserMessage] = useState<string>("");
 
   const activeChat = chats.find((c) => c.id === activeChatId)!;
@@ -518,6 +531,15 @@ export default function Home() {
   useEffect(() => {
     scrollToBottom();
   }, [currentMessages, loading, scrollToBottom]);
+
+  // Debug currentMessages changes
+  useEffect(() => {
+    console.log('Current messages updated:', currentMessages);
+    console.log('Messages length:', currentMessages.length);
+    if (currentMessages.length > 0) {
+      console.log('Last message:', currentMessages[currentMessages.length - 1]);
+    }
+  }, [currentMessages]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -574,17 +596,63 @@ export default function Home() {
       ));
     }
     
+    if (isCreatingMessage.current) {
+      console.log('Already creating message, skipping');
+      return;
+    }
+    
+    isCreatingMessage.current = true;
     const loadingMessageId = `${activeChatId}-${Date.now()}`;
-    setTypingMessages(prev => new Set(prev).add(loadingMessageId));
-    setCurrentMessages(prev => [...prev, { sender: "bot", text: "", id: loadingMessageId }]);
+    console.log('Creating initial bot message with ID:', loadingMessageId);
+    setCurrentMessages(prev => {
+      // Check if we already have a bot message with empty text (loading state)
+      const hasLoadingMessage = prev.some(msg => msg.sender === 'bot' && msg.text === '');
+      if (hasLoadingMessage) {
+        console.log('Loading message already exists, skipping creation');
+        isCreatingMessage.current = false;
+        return prev;
+      }
+      const newMessages = [...prev, { sender: "bot", text: "", id: loadingMessageId }];
+      console.log('Initial bot message created:', newMessages[newMessages.length - 1]);
+      return newMessages;
+    });
     
     try {
-      const response = await query({ question: userMsg.text, threadId: activeChat.threadId });
+      let receivedThreadId = activeChat.threadId;
+      
+      await queryStream(
+        { question: userMsg.text, threadId: activeChat.threadId },
+        (text) => {
+          // Append each character immediately for real-time streaming
+          console.log('Received character:', text);
+          setCurrentMessages(prev => {
+            const lastMessage = prev[prev.length - 1];
+            const newText = (lastMessage?.text || "") + text;
+            console.log('Updated text:', newText);
+            const newMessage = { 
+              sender: "bot", 
+              text: newText, 
+              id: loadingMessageId 
+            };
+            console.log('New message object:', newMessage);
+            return [
+              ...prev.slice(0, -1),
+              newMessage
+            ];
+          });
+        },
+        (threadId) => {
+          receivedThreadId = threadId;
+        },
+        (error) => {
+          throw new Error(error);
+        }
+      );
       
       // Update chat with thread ID and updated timestamp
       const updatedChat = { 
         ...activeChat, 
-        threadId: response.threadId,
+        threadId: receivedThreadId,
         title: newTitle || activeChat.title,
         updated: Date.now()
       };
@@ -602,17 +670,6 @@ export default function Home() {
         }
       }
       
-      setCurrentMessages(prev => [
-        ...prev.slice(0, -1),
-        { sender: "bot", text: response.text || "Sorry, I didn't understand that.", id: loadingMessageId }
-      ]);
-      
-      setTypingMessages(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(loadingMessageId);
-        return newSet;
-      });
-      
     } catch (err) {
       setCurrentMessages(prev => [
         ...prev.slice(0, -1),
@@ -624,13 +681,9 @@ export default function Home() {
           Error: err
         }
       ]);
-      setTypingMessages(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(loadingMessageId);
-        return newSet;
-      });
     } finally {
       setLoading(false);
+      isCreatingMessage.current = false;
     }
   }
 
@@ -640,7 +693,6 @@ export default function Home() {
     
     setLoading(true);
     const loadingMessageId = `${activeChatId}-${Date.now()}`;
-    setTypingMessages(prev => new Set(prev).add(loadingMessageId));
     
     // Remove the last bot message
     setCurrentMessages(prev => {
@@ -654,18 +706,30 @@ export default function Home() {
     });
     
     try {
-      const response = await query({ question: lastUserMessage, threadId: activeChat.threadId });
-      
-      setCurrentMessages(prev => [
-        ...prev.slice(0, -1),
-        { sender: "bot", text: response.text || "Sorry, I didn't understand that.", id: loadingMessageId }
-      ]);
-      
-      setTypingMessages(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(loadingMessageId);
-        return newSet;
-      });
+      await queryStream(
+        { question: lastUserMessage, threadId: activeChat.threadId },
+        (text) => {
+          // Append each character immediately for real-time streaming
+          console.log('Regenerate - Received character:', text);
+          setCurrentMessages(prev => {
+            const lastMessage = prev[prev.length - 1];
+            const newText = (lastMessage?.text || "") + text;
+            console.log('Regenerate - Updated text:', newText);
+            return [
+              ...prev.slice(0, -1),
+              { 
+                sender: "bot", 
+                text: newText, 
+                id: loadingMessageId 
+              }
+            ];
+          });
+        },
+        () => {}, // No thread ID update needed for regeneration
+        (error) => {
+          throw new Error(error);
+        }
+      );
       
       // Update the chat's updated timestamp
       const updatedChat = { 
@@ -697,11 +761,6 @@ export default function Home() {
           Error: err
         }
       ]);
-      setTypingMessages(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(loadingMessageId);
-        return newSet;
-      });
     } finally {
       setLoading(false);
     }
@@ -883,7 +942,7 @@ export default function Home() {
           <div className="max-w-4xl mx-auto flex flex-col gap-4">
             {currentMessages.map((msg, idx) => (
               <div
-                key={idx}
+                key={`${msg.id || idx}-${msg.text.length}`}
                 className={`group flex ${msg.sender === "user" ? "justify-end" : "justify-start"}`}
               >
                 <div
@@ -896,7 +955,7 @@ export default function Home() {
                   }`}
                 >
                   {msg.image && (
-                    <Image
+            <Image
                       src={msg.image}
                       alt="Uploaded"
                       width={300}
@@ -905,32 +964,15 @@ export default function Home() {
                     />
                   )}
                   <div className="whitespace-pre-wrap">
-                    {msg.sender === "bot" ? (
-                      <div className="prose prose-sm max-w-none">
-                        {typingMessages.has(msg.id || "") ? (
-                          <div className="prose prose-sm max-w-none">
-                            <TypewriterText
-                              text={msg.text}
-                              onComplete={() => {
-                                setTypingMessages(prev => {
-                                  const newSet = new Set(prev);
-                                  newSet.delete(msg.id || "");
-                                  return newSet;
-                                });
-                              }}
-                            />
-                          </div>
-                        ) : (
-                          <div className="prose prose-sm max-w-none">
-                            {processTextWithCitations(msg.text)}
-                          </div>
-                        )}
-                      </div>
-                    ) : (
+                                          {msg.sender === "bot" ? (
+                        <div className="prose prose-sm max-w-none">
+                          {msg.text ? processTextWithCitations(msg.text) : <TypingDots />}
+                        </div>
+                      ) : (
                       msg.text
                     )}
                   </div>
-                  {msg.sender === "bot" && !typingMessages.has(msg.id || "") && (
+                  {msg.sender === "bot" && (
                     <MessageActions
                       message={msg}
                       onCopy={() => handleCopyMessage(msg.text)}
