@@ -72,13 +72,17 @@ export async function POST(req: NextRequest) {
   try {
     const { question, threadId } = await req.json();
     
-    if (!question) {
+    if (!question?.trim()) {
       return NextResponse.json({ error: 'Missing question' }, { status: 400 });
     }
 
     if (!OPENAI_API_KEY || !ASSISTANT_ID) {
       return NextResponse.json({ error: 'OpenAI configuration missing' }, { status: 500 });
     }
+
+    // Rate limiting (basic)
+    const clientIP = req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip') || 'unknown';
+    console.log(`Request from IP: ${clientIP}`);
 
     let currentThreadId = threadId;
 
@@ -244,6 +248,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       text: assistantMessage.content[0]?.text?.value || 'No response from assistant',
       threadId: currentThreadId
+    }, {
+      headers: {
+        'Cache-Control': 'no-cache',
+        'Content-Type': 'application/json',
+      }
     });
 
   } catch (err) {
@@ -251,6 +260,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ 
       error: 'Assistant API error', 
       details: err instanceof Error ? err.message : 'Unknown error'
-    }, { status: 500 });
+    }, { 
+      status: 500,
+      headers: {
+        'Cache-Control': 'no-cache',
+        'Content-Type': 'application/json',
+      }
+    });
   }
 }

@@ -1,5 +1,5 @@
 'use client'
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import ReactMarkdown from 'react-markdown';
 import Image from 'next/image';
 import { FcGoogle } from 'react-icons/fc';
@@ -7,53 +7,75 @@ import { supabase } from './supabaseClient';
 import type { User as SupabaseUser } from '@supabase/supabase-js';
 
 // Message type
- type ChatMessage = {
-   sender: string;
-   text: string;
-   image?: string;
-   id?: string; // Added for typing animation
- };
+type ChatMessage = {
+  sender: string;
+  text: string;
+  image?: string;
+  id?: string;
+  timestamp?: number;
+  isError?: boolean;
+};
 
 // Simplified chat storage using OpenAI threads
 type ChatSession = {
   id: string;
   title: string;
   created: number;
-  threadId?: string; // OpenAI thread ID - this is our primary storage
+  updated: number; // Track when last interacted with
+  threadId?: string;
 };
 
-// Backend API query function (calls internal API route, text only)
+// Backend API query function
 async function query(data: { question: string; threadId?: string }) {
   const response = await fetch("/api/chatbot", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
+  
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+  
   const result = await response.json();
   return result;
 }
 
-// Spinner component
+// Enhanced Spinner component
 function Spinner() {
   return (
-    <span className="inline-block align-middle">
-      <span className="w-5 h-5 border-2 border-blue-300 border-t-blue-600 rounded-full animate-spin inline-block"></span>
-    </span>
+    <div className="flex items-center justify-center">
+      <div className="relative">
+        <div className="w-5 h-5 border-2 border-blue-300 border-t-blue-600 rounded-full animate-spin"></div>
+        <div className="absolute inset-0 w-5 h-5 border-2 border-transparent border-t-blue-400 rounded-full animate-ping"></div>
+      </div>
+    </div>
   );
 }
 
 function formatDate(ts: number) {
   const d = new Date(ts);
-  return d.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+  const now = new Date();
+  const diff = now.getTime() - d.getTime();
+  const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+  
+  if (days === 0) {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } else if (days === 1) {
+    return 'Yesterday';
+  } else if (days < 7) {
+    return d.toLocaleDateString([], { weekday: 'short' });
+  } else {
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  }
 }
 
-// Auth Modal Component
+// Enhanced Auth Modal Component
 function AuthModal({ open, onClose, initialTab = 'signin', setUser }: { open: boolean, onClose: () => void, initialTab?: 'signin' | 'signup', setUser: (user: SupabaseUser | null) => void }) {
   const [tab, setTab] = useState<'signin' | 'signup'>(initialTab);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Reset tab when modal opens
   useEffect(() => {
     if (open) setTab(initialTab || 'signin');
     setError(null);
@@ -66,39 +88,51 @@ function AuthModal({ open, onClose, initialTab = 'signin', setUser }: { open: bo
     const form = e.currentTarget;
     const email = (form.elements.namedItem('email') as HTMLInputElement).value;
     const password = (form.elements.namedItem('password') as HTMLInputElement).value;
-    if (tab === 'signin') {
-      const { error, data } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) setError(error.message);
-      else {
-        setUser(data.user);
-        onClose();
+    
+    try {
+      if (tab === 'signin') {
+        const { error, data } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) setError(error.message);
+        else {
+          setUser(data.user);
+          onClose();
+        }
+      } else {
+        const name = (form.elements.namedItem('name') as HTMLInputElement).value;
+        const { error, data } = await supabase.auth.signUp({ email, password, options: { data: { name } } });
+        if (error) setError(error.message);
+        else {
+          setUser(data.user);
+          onClose();
+        }
       }
-    } else {
-      const name = (form.elements.namedItem('name') as HTMLInputElement).value;
-      const { error, data } = await supabase.auth.signUp({ email, password, options: { data: { name } } });
-      if (error) setError(error.message);
-      else {
-        setUser(data.user);
-        onClose();
-      }
+    } catch (err) {
+      setError('An unexpected error occurred: ' + err);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }
 
   async function handleGoogleAuth() {
     setError(null);
     setLoading(true);
-    const { error } = await supabase.auth.signInWithOAuth({ provider: 'google' });
-    if (error) setError(error.message);
-    setLoading(false);
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({ provider: 'google' });
+      if (error) setError(error.message);
+    } catch (err) {
+      setError('An unexpected error occurred: ' + err);
+    } finally {
+      setLoading(false);
+    }
   }
 
   if (!open) return null;
+  
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
       <div className="bg-white/95 backdrop-blur-sm rounded-3xl shadow-2xl w-full max-w-md p-6 md:p-8 relative animate-fadeIn border border-blue-100/50">
         <button
-          className="absolute top-4 right-4 text-blue-400 hover:text-blue-700 text-2xl font-bold"
+          className="absolute top-4 right-4 text-blue-400 hover:text-blue-700 text-2xl font-bold transition-colors"
           onClick={onClose}
           aria-label="Close"
         >
@@ -118,40 +152,44 @@ function AuthModal({ open, onClose, initialTab = 'signin', setUser }: { open: bo
             Sign Up
           </button>
         </div>
-        {error && <div className="mb-4 text-red-500 text-sm text-center">{error}</div>}
+        {error && <div className="mb-4 text-red-500 text-sm text-center bg-red-50 p-3 rounded-lg">{error}</div>}
         {tab === 'signin' ? (
           <>
             <button
               type="button"
-              className="flex items-center justify-center gap-2 w-full py-3 mb-4 rounded-full border border-blue-200 bg-white hover:bg-blue-50 text-blue-900 font-semibold shadow-sm transition"
+              className="flex items-center justify-center gap-2 w-full py-3 mb-4 rounded-full border border-blue-200 bg-white hover:bg-blue-50 text-blue-900 font-semibold shadow-sm transition disabled:opacity-50"
               onClick={handleGoogleAuth}
               disabled={loading}
             >
               <FcGoogle className="w-5 h-5" /> Sign in with Google
             </button>
             <form className="flex flex-col gap-4" onSubmit={handleEmailAuth}>
-              <input name="email" type="email" placeholder="Email" className="px-4 py-3 rounded-full border border-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-200 bg-blue-50 text-blue-900" />
-              <input name="password" type="password" placeholder="Password" className="px-4 py-3 rounded-full border border-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-200 bg-blue-50 text-blue-900" />
-              <button type="submit" className="mt-2 px-6 py-3 rounded-full bg-blue-700 text-white font-semibold hover:bg-blue-800 transition" disabled={loading}>Sign In</button>
-              <div className="text-xs text-blue-400 text-center mt-2">Don&apos;t have an account? <button type="button" className="text-blue-700 underline" onClick={() => setTab('signup')}>Sign Up</button></div>
+              <input name="email" type="email" placeholder="Email" required className="px-4 py-3 rounded-full border border-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-200 bg-blue-50 text-blue-900 transition-all" />
+              <input name="password" type="password" placeholder="Password" required className="px-4 py-3 rounded-full border border-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-200 bg-blue-50 text-blue-900 transition-all" />
+              <button type="submit" className="mt-2 px-6 py-3 rounded-full bg-blue-700 text-white font-semibold hover:bg-blue-800 transition disabled:opacity-50" disabled={loading}>
+                {loading ? <Spinner /> : 'Sign In'}
+              </button>
+              <div className="text-xs text-blue-400 text-center mt-2">Don&apos;t have an account? <button type="button" className="text-blue-700 underline hover:text-blue-800" onClick={() => setTab('signup')}>Sign Up</button></div>
             </form>
           </>
         ) : (
           <>
             <button
               type="button"
-              className="flex items-center justify-center gap-2 w-full py-3 mb-4 rounded-full border border-blue-200 bg-white hover:bg-blue-50 text-blue-900 font-semibold shadow-sm transition"
+              className="flex items-center justify-center gap-2 w-full py-3 mb-4 rounded-full border border-blue-200 bg-white hover:bg-blue-50 text-blue-900 font-semibold shadow-sm transition disabled:opacity-50"
               onClick={handleGoogleAuth}
               disabled={loading}
             >
               <FcGoogle className="w-5 h-5" /> Sign up with Google
             </button>
             <form className="flex flex-col gap-4" onSubmit={handleEmailAuth}>
-              <input name="name" type="text" placeholder="Full Name" className="px-4 py-3 rounded-full border border-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-200 bg-blue-50 text-blue-900" />
-              <input name="email" type="email" placeholder="Email" className="px-4 py-3 rounded-full border border-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-200 bg-blue-50 text-blue-900" />
-              <input name="password" type="password" placeholder="Password" className="px-4 py-3 rounded-full border border-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-200 bg-blue-50 text-blue-900" />
-              <button type="submit" className="mt-2 px-6 py-3 rounded-full bg-blue-700 text-white font-semibold hover:bg-blue-800 transition" disabled={loading}>Sign Up</button>
-              <div className="text-xs text-blue-400 text-center mt-2">Already have an account? <button type="button" className="text-blue-700 underline" onClick={() => setTab('signin')}>Sign In</button></div>
+              <input name="name" type="text" placeholder="Full Name" required className="px-4 py-3 rounded-full border border-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-200 bg-blue-50 text-blue-900 transition-all" />
+              <input name="email" type="email" placeholder="Email" required className="px-4 py-3 rounded-full border border-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-200 bg-blue-50 text-blue-900 transition-all" />
+              <input name="password" type="password" placeholder="Password" required minLength={6} className="px-4 py-3 rounded-full border border-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-200 bg-blue-50 text-blue-900 transition-all" />
+              <button type="submit" className="mt-2 px-6 py-3 rounded-full bg-blue-700 text-white font-semibold hover:bg-blue-800 transition disabled:opacity-50" disabled={loading}>
+                {loading ? <Spinner /> : 'Sign Up'}
+              </button>
+              <div className="text-xs text-blue-400 text-center mt-2">Already have an account? <button type="button" className="text-blue-700 underline hover:text-blue-800" onClick={() => setTab('signin')}>Sign In</button></div>
             </form>
           </>
         )}
@@ -160,10 +198,10 @@ function AuthModal({ open, onClose, initialTab = 'signin', setUser }: { open: bo
   );
 }
 
-// Typing dots animation component
+// Enhanced Typing dots animation
 function TypingDots() {
   return (
-    <div className="flex space-x-1">
+    <div className="flex items-center space-x-1">
       <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"></div>
       <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
       <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
@@ -171,35 +209,50 @@ function TypingDots() {
   );
 }
 
-// Typewriter text component
+// Enhanced Typewriter text component with cursor
 function TypewriterText({ text, onComplete }: { text: string; onComplete?: () => void }) {
   const [displayedText, setDisplayedText] = useState('');
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [showCursor, setShowCursor] = useState(true);
 
   useEffect(() => {
     if (currentIndex < text.length) {
       const timer = setTimeout(() => {
         setDisplayedText(prev => prev + text[currentIndex]);
         setCurrentIndex(prev => prev + 1);
-      }, 15); // Speed of typing (faster)
+      }, 20); // Slightly faster typing
 
       return () => clearTimeout(timer);
     } else if (onComplete) {
+      setShowCursor(false);
       onComplete();
     }
   }, [currentIndex, text, onComplete]);
 
-  return <span>{displayedText}</span>;
+  // Cursor blink effect
+  useEffect(() => {
+    const cursorTimer = setInterval(() => {
+      setShowCursor(prev => !prev);
+    }, 500);
+    return () => clearInterval(cursorTimer);
+  }, []);
+
+  return (
+    <span>
+      {displayedText}
+      {showCursor && <span className="inline-block w-0.5 h-4 bg-blue-600 ml-0.5 animate-pulse"></span>}
+    </span>
+  );
 }
 
-// Citation component
+// Enhanced Citation component
 function CitationButton({ citation }: { citation: string }) {
   return (
     <span className="inline-block relative group">
       <button className="inline-flex items-center justify-center w-5 h-5 bg-blue-100 text-blue-700 rounded-full text-xs font-semibold hover:bg-blue-200 transition-all duration-200 group-hover:scale-110">
         📄
       </button>
-      <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-800 text-white text-sm rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-50">
+      <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-800 text-white text-sm rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none whitespace-nowrap z-50 max-w-xs">
         {citation}
         <div className="absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-800"></div>
       </div>
@@ -207,21 +260,30 @@ function CitationButton({ citation }: { citation: string }) {
   );
 }
 
-// Function to process text and extract citations with markdown
+// Enhanced text processing with citations and markdown
 function processTextWithCitations(text: string) {
-  // Split text by citation pattern
   const parts = text.split(/(【[^】]+】)/);
   
   return parts.map((part, index) => {
     if (part.match(/^【[^】]+】$/)) {
-      // This is a citation
-      const citation = part.slice(1, -1); // Remove 【】
+      const citation = part.slice(1, -1);
       return <CitationButton key={index} citation={citation} />;
     } else {
-      // This is regular text - render with markdown
       return (
         <span key={index} className="inline">
-          <ReactMarkdown>
+          <ReactMarkdown
+            components={{
+              p: ({ children }) => <span className="inline">{children}</span>,
+              strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+              em: ({ children }) => <em className="italic">{children}</em>,
+              code: ({ children }) => <code className="bg-gray-100 px-1 py-0.5 rounded text-sm font-mono">{children}</code>,
+              pre: ({ children }) => <pre className="bg-gray-100 p-2 rounded text-sm font-mono overflow-x-auto">{children}</pre>,
+              ul: ({ children }) => <ul className="list-disc list-inside space-y-1">{children}</ul>,
+              ol: ({ children }) => <ol className="list-decimal list-inside space-y-1">{children}</ol>,
+              li: ({ children }) => <li className="text-sm">{children}</li>,
+              blockquote: ({ children }) => <blockquote className="border-l-4 border-blue-200 pl-4 italic text-gray-600">{children}</blockquote>,
+            }}
+          >
             {part}
           </ReactMarkdown>
         </span>
@@ -230,13 +292,41 @@ function processTextWithCitations(text: string) {
   });
 }
 
+// Message actions component
+function MessageActions({ message, onCopy, onRegenerate }: { message: ChatMessage; onCopy: () => void; onRegenerate?: () => void }) {
+  return (
+    <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+      <div className="flex gap-1 bg-white/90 backdrop-blur-sm rounded-lg p-1 shadow-lg border border-gray-200">
+        <button
+          onClick={onCopy}
+          className="p-1 hover:bg-gray-100 rounded transition-colors"
+          title="Copy message"
+        >
+          <svg className="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+          </svg>
+        </button>
+        {onRegenerate && message.sender === 'bot' && (
+          <button
+            onClick={onRegenerate}
+            className="p-1 hover:bg-gray-100 rounded transition-colors"
+            title="Regenerate response"
+          >
+            <svg className="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // Auto-title generation function
 async function generateChatTitle(firstMessage: string): Promise<string> {
   try {
-    // Clean the message
     let cleanedMessage = firstMessage.trim();
     
-    // Strip common greetings
     const greetings = [
       'hey', 'hello', 'hi', 'good morning', 'good afternoon', 'good evening',
       'greetings', 'howdy', 'yo', 'what\'s up', 'sup', 'good day'
@@ -247,7 +337,6 @@ async function generateChatTitle(firstMessage: string): Promise<string> {
       cleanedMessage = cleanedMessage.replace(regex, '');
     }
     
-    // Remove filler words
     const fillerWords = [
       'um', 'uh', 'like', 'you know', 'basically', 'actually', 'literally',
       'kind of', 'sort of', 'i think', 'i guess', 'maybe', 'probably'
@@ -258,18 +347,14 @@ async function generateChatTitle(firstMessage: string): Promise<string> {
       cleanedMessage = cleanedMessage.replace(regex, '');
     }
     
-    // Clean up extra spaces
     cleanedMessage = cleanedMessage.replace(/\s+/g, ' ').trim();
     
-    // If message is empty after cleaning, return default
     if (!cleanedMessage) {
       return 'New Chat';
     }
     
-    // Use first sentence (up to 50 characters)
     let title = cleanedMessage.split(/[.!?]/)[0].trim();
     
-    // If still too long, truncate to 30 characters
     if (title.length > 30) {
       title = title.substring(0, 30) + '...';
     }
@@ -284,27 +369,18 @@ async function generateChatTitle(firstMessage: string): Promise<string> {
 // Database functions for user-thread mapping
 async function saveChatToDatabase(chat: ChatSession, userId: string) {
   try {
-    console.log('Saving chat metadata to Supabase:', {
-      chatId: chat.id,
-      userId: userId,
-      title: chat.title,
-      threadId: chat.threadId
-    });
-    
-    // Save or update chat session in Supabase
-    const { error: chatError } = await supabase
-      .from('chats')
-      .upsert({
-        id: chat.id,
-        user_id: userId,
-        title: chat.title,
-        created_at: new Date(chat.created).toISOString(),
-        updated_at: new Date().toISOString(),
-        thread_id: chat.threadId
-      });
+          const { error: chatError } = await supabase
+        .from('chats')
+        .upsert({
+          id: chat.id,
+          user_id: userId,
+          title: chat.title,
+          created_at: new Date(chat.created).toISOString(),
+          updated_at: new Date(chat.updated).toISOString(),
+          thread_id: chat.threadId
+        });
 
     if (chatError) throw chatError;
-    console.log('Chat metadata saved successfully to Supabase');
   } catch (error) {
     console.error('Error saving chat metadata to Supabase:', error);
     throw error;
@@ -313,9 +389,6 @@ async function saveChatToDatabase(chat: ChatSession, userId: string) {
 
 async function loadUserChats(userId: string): Promise<ChatSession[]> {
   try {
-    console.log('Loading chats for user from Supabase:', userId);
-    
-    // Load chat sessions from Supabase
     const { data: chatsData, error: chatsError } = await supabase
       .from('chats')
       .select('*')
@@ -324,27 +397,24 @@ async function loadUserChats(userId: string): Promise<ChatSession[]> {
 
     if (chatsError) throw chatsError;
 
-    console.log('Found chats in Supabase:', chatsData);
-
     if (!chatsData || chatsData.length === 0) {
-      console.log('No chats found, creating default chat');
       const defaultChat: ChatSession = {
         id: Date.now().toString(),
         title: 'New Chat',
         created: Date.now(),
+        updated: Date.now(),
       };
       return [defaultChat];
     }
 
-    // Convert Supabase data to ChatSession format
     const chats: ChatSession[] = chatsData.map(chatData => ({
       id: chatData.id,
       title: chatData.title,
       created: new Date(chatData.created_at).getTime(),
+      updated: new Date(chatData.updated_at).getTime(),
       threadId: chatData.thread_id
     }));
 
-    console.log('Returning chats from Supabase:', chats);
     return chats;
   } catch (error) {
     console.error('Error loading chats from Supabase:', error);
@@ -352,6 +422,7 @@ async function loadUserChats(userId: string): Promise<ChatSession[]> {
       id: Date.now().toString(),
       title: 'New Chat',
       created: Date.now(),
+      updated: Date.now(),
     }];
   }
 }
@@ -359,8 +430,6 @@ async function loadUserChats(userId: string): Promise<ChatSession[]> {
 // Load messages from OpenAI thread
 async function loadMessagesFromThread(threadId: string): Promise<ChatMessage[]> {
   try {
-    console.log('Loading messages from OpenAI thread:', threadId);
-    
     const response = await fetch('/api/chatbot/messages', {
       method: 'POST',
       headers: {
@@ -374,7 +443,6 @@ async function loadMessagesFromThread(threadId: string): Promise<ChatMessage[]> 
     }
 
     const data = await response.json();
-    console.log('Loaded messages from thread:', data.messages);
     return data.messages;
   } catch (error) {
     console.error('Error loading messages from thread:', error);
@@ -389,6 +457,7 @@ export default function Home() {
       id: Date.now().toString(),
       title: 'New Chat',
       created: Date.now(),
+      updated: Date.now(),
     },
   ]);
   const [activeChatId, setActiveChatId] = useState(chats[0].id);
@@ -399,13 +468,36 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const [authModalOpen, setAuthModalOpen] = useState<false | 'signin' | 'signup'>(false);
   const [user, setUser] = useState<SupabaseUser | null>(null);
   const [typingMessages, setTypingMessages] = useState<Set<string>>(new Set());
+  const [lastUserMessage, setLastUserMessage] = useState<string>("");
 
-
-  // Get active chat
   const activeChat = chats.find((c) => c.id === activeChatId)!;
+
+  // New chat
+  const handleNewChat = useCallback(async () => {
+    const newId = Date.now().toString();
+    const newChat: ChatSession = {
+      id: newId,
+      title: 'New Chat',
+      created: Date.now(),
+      updated: Date.now(),
+    };
+    setChats((prev) => [newChat, ...prev]);
+    setActiveChatId(newId);
+    setSidebarOpen(false);
+    setLastUserMessage("");
+    
+    if (user) {
+      try {
+        await saveChatToDatabase(newChat, user.id);
+      } catch (error) {
+        console.error('Error saving new chat:', error);
+      }
+    }
+  }, [user]);
 
   // Load messages when switching chats
   useEffect(() => {
@@ -418,31 +510,60 @@ export default function Home() {
     }
   }, [activeChatId, activeChat?.threadId]);
 
-  // Scroll to bottom on new message
-  useEffect(() => {
+  // Enhanced scroll to bottom
+  const scrollToBottom = useCallback(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [currentMessages, loading]);
+  }, []);
 
-  // Handle sending a message
+  useEffect(() => {
+    scrollToBottom();
+  }, [currentMessages, loading, scrollToBottom]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Cmd/Ctrl + K for new chat
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        handleNewChat();
+      }
+      // Cmd/Ctrl + L to focus input
+      if ((e.metaKey || e.ctrlKey) && e.key === 'l') {
+        e.preventDefault();
+        inputRef.current?.focus();
+      }
+      // Escape to close sidebar
+      if (e.key === 'Escape' && sidebarOpen) {
+        setSidebarOpen(false);
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [sidebarOpen, handleNewChat]);
+
+  // Enhanced message sending with better error handling
   async function handleSend(e: React.FormEvent) {
     e.preventDefault();
-    // Reactivate auth
     if (!user) {
       setAuthModalOpen('signin');
       return;
     }
     if (!input.trim() || loading) return;
-    const userMsg: ChatMessage = { sender: "user", text: input };
     
-    // Check if this is the first user message (auto-title)
+    const userMsg: ChatMessage = { 
+      sender: "user", 
+      text: input,
+      timestamp: Date.now()
+    };
+    
     const isFirstUserMessage = currentMessages.filter(msg => msg.sender === 'user').length === 0;
     
-    // Add user message
     setCurrentMessages(prev => [...prev, userMsg]);
+    setLastUserMessage(input);
     setInput("");
     setLoading(true);
     
-    // Generate title if this is the first user message
     let newTitle = '';
     if (isFirstUserMessage) {
       newTitle = await generateChatTitle(input);
@@ -453,7 +574,6 @@ export default function Home() {
       ));
     }
     
-    // Add loading indicator with typing animation
     const loadingMessageId = `${activeChatId}-${Date.now()}`;
     setTypingMessages(prev => new Set(prev).add(loadingMessageId));
     setCurrentMessages(prev => [...prev, { sender: "bot", text: "", id: loadingMessageId }]);
@@ -461,36 +581,32 @@ export default function Home() {
     try {
       const response = await query({ question: userMsg.text, threadId: activeChat.threadId });
       
-      // Update chat with thread ID if this is the first message
-      if (!activeChat.threadId) {
-        const updatedChat = { 
-          ...activeChat, 
-          threadId: response.threadId,
-          title: newTitle || activeChat.title
-        };
-        setChats((prev) => prev.map(chat =>
-          chat.id === activeChatId
-            ? updatedChat
-            : chat
-        ));
-        
-        // Save the updated chat with threadId to Supabase
-        if (user) {
-          try {
-            await saveChatToDatabase(updatedChat, user.id);
-          } catch (error) {
-            console.error('Error saving chat with threadId:', error);
-          }
+      // Update chat with thread ID and updated timestamp
+      const updatedChat = { 
+        ...activeChat, 
+        threadId: response.threadId,
+        title: newTitle || activeChat.title,
+        updated: Date.now()
+      };
+      setChats((prev) => prev.map(chat =>
+        chat.id === activeChatId
+          ? updatedChat
+          : chat
+      ));
+      
+      if (user) {
+        try {
+          await saveChatToDatabase(updatedChat, user.id);
+        } catch (error) {
+          console.error('Error saving chat with threadId:', error);
         }
       }
       
-      // Replace loading message with actual response
       setCurrentMessages(prev => [
         ...prev.slice(0, -1),
         { sender: "bot", text: response.text || "Sorry, I didn't understand that.", id: loadingMessageId }
       ]);
       
-      // Start typing animation
       setTypingMessages(prev => {
         const newSet = new Set(prev);
         newSet.delete(loadingMessageId);
@@ -500,7 +616,13 @@ export default function Home() {
     } catch (err) {
       setCurrentMessages(prev => [
         ...prev.slice(0, -1),
-        { sender: "bot", text: "Sorry, there was an error. Please try again." + err, id: loadingMessageId }
+        { 
+          sender: "bot", 
+          text: "Sorry, there was an error processing your request. Please try again.", 
+          id: loadingMessageId,
+          isError: true, 
+          Error: err
+        }
       ]);
       setTypingMessages(prev => {
         const newSet = new Set(prev);
@@ -512,13 +634,100 @@ export default function Home() {
     }
   }
 
-  // Handle image upload (local preview only)
+  // Regenerate last response
+  const handleRegenerate = useCallback(async () => {
+    if (!lastUserMessage || loading) return;
+    
+    setLoading(true);
+    const loadingMessageId = `${activeChatId}-${Date.now()}`;
+    setTypingMessages(prev => new Set(prev).add(loadingMessageId));
+    
+    // Remove the last bot message
+    setCurrentMessages(prev => {
+      const newMessages = [...prev];
+      const lastBotIndex = newMessages.findLastIndex(msg => msg.sender === 'bot');
+      if (lastBotIndex !== -1) {
+        newMessages.splice(lastBotIndex, 1);
+      }
+      newMessages.push({ sender: "bot", text: "", id: loadingMessageId });
+      return newMessages;
+    });
+    
+    try {
+      const response = await query({ question: lastUserMessage, threadId: activeChat.threadId });
+      
+      setCurrentMessages(prev => [
+        ...prev.slice(0, -1),
+        { sender: "bot", text: response.text || "Sorry, I didn't understand that.", id: loadingMessageId }
+      ]);
+      
+      setTypingMessages(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(loadingMessageId);
+        return newSet;
+      });
+      
+      // Update the chat's updated timestamp
+      const updatedChat = { 
+        ...activeChat, 
+        updated: Date.now()
+      };
+      setChats((prev) => prev.map(chat =>
+        chat.id === activeChatId
+          ? updatedChat
+          : chat
+      ));
+      
+      if (user) {
+        try {
+          await saveChatToDatabase(updatedChat, user.id);
+        } catch (error) {
+          console.error('Error saving regenerated chat:', error);
+        }
+      }
+      
+    } catch (err) {
+      setCurrentMessages(prev => [
+        ...prev.slice(0, -1),
+        { 
+          sender: "bot", 
+          text: "Sorry, there was an error processing your request. Please try again.", 
+          id: loadingMessageId,
+          isError: true,
+          Error: err
+        }
+      ]);
+      setTypingMessages(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(loadingMessageId);
+        return newSet;
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, [lastUserMessage, loading, activeChatId, activeChat, user]);
+
+  // Copy message to clipboard
+  const handleCopyMessage = useCallback(async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      // Show a brief success indicator
+      console.log('Message copied to clipboard');
+    } catch (err) {
+      console.error('Failed to copy message:', err);
+      // Fallback for older browsers
+      const textArea = document.createElement('textarea');
+      textArea.value = text;
+      document.body.appendChild(textArea);
+      textArea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textArea);
+      console.log('Message copied to clipboard (fallback)');
+    }
+  }, []);
+
+  // Handle image upload
   function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    // Temporarily disabled auth
-    // if (!user) {
-    //   setAuthModalOpen('signin');
-    //   return;
-    // }
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
@@ -529,34 +738,10 @@ export default function Home() {
     e.target.value = "";
   }
 
-  // New chat
-  async function handleNewChat() {
-    const newId = Date.now().toString();
-    const newChat: ChatSession = {
-      id: newId,
-      title: 'New Chat',
-      created: Date.now(),
-    };
-    setChats((prev) => [newChat, ...prev]);
-    setActiveChatId(newId);
-    setSidebarOpen(false);
-    
-    // Save new chat to Supabase if user is logged in
-    if (user) {
-      try {
-        await saveChatToDatabase(newChat, user.id);
-      } catch (error) {
-        console.error('Error saving new chat:', error);
-      }
-    }
-  }
-
   // Load user chats when user logs in
   useEffect(() => {
     if (user) {
-      console.log('Loading chats for user:', user.id);
       loadUserChats(user.id).then(loadedChats => {
-        console.log('Loaded chats:', loadedChats);
         setChats(loadedChats);
         if (loadedChats.length > 0) {
           setActiveChatId(loadedChats[0].id);
@@ -570,21 +755,17 @@ export default function Home() {
   // Save chat when threadId or title changes
   useEffect(() => {
     if (user && activeChat && activeChat.threadId) {
-      console.log('Saving chat to database:', activeChat.id, 'for user:', user.id);
       saveChatToDatabase(activeChat, user.id).catch(error => {
         console.error('Error saving chat:', error);
       });
     }
   }, [activeChat, user]);
 
-
-
   // Track Supabase auth session
   useEffect(() => {
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null);
     });
-    // Get initial session
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null);
     });
@@ -601,7 +782,7 @@ export default function Home() {
         />
       )}
 
-      {/* Sidebar */}
+      {/* Enhanced Sidebar */}
       <aside
         className={`bg-white/95 backdrop-blur-sm border-r border-blue-100/50 h-screen flex flex-col transition-all duration-300 z-40 ${
           sidebarOpen 
@@ -616,7 +797,7 @@ export default function Home() {
             <button
               className="bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-full p-2 transition-colors duration-200"
               onClick={handleNewChat}
-              title="New Chat"
+              title="New Chat (⌘K)"
             >
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
@@ -637,13 +818,13 @@ export default function Home() {
           {chats.map((chat) => (
             <button
               key={chat.id}
-              className={`w-full text-left px-3 py-3 border border-transparent hover:border-blue-200 hover:bg-blue-50/50 transition-all duration-200 flex flex-col rounded-xl mb-2 ${
+              className={`w-full text-left px-3 py-3 border border-transparent hover:border-blue-200 hover:bg-blue-50/50 transition-all duration-200 flex flex-col rounded-xl mb-2 group ${
                 chat.id === activeChatId ? 'bg-blue-100/70 border-blue-200 shadow-sm' : ''
               }`}
               onClick={() => { setActiveChatId(chat.id); setSidebarOpen(false); }}
             >
               <span className="font-medium text-blue-900 truncate text-sm">{chat.title}</span>
-              <span className="text-xs text-blue-400 mt-1">{formatDate(chat.created)}</span>
+              <span className="text-xs text-blue-400 mt-1">{formatDate(chat.updated)}</span>
             </button>
           ))}
         </div>
@@ -654,10 +835,10 @@ export default function Home() {
         </div>
       </aside>
 
-              {/* Main Chat Area */}
-        <main className="flex-1 flex flex-col h-screen min-h-0 relative">
-          {/* Header */}
-          <header className="bg-white/80 backdrop-blur-sm border-b border-blue-100/50 px-4 py-3 flex items-center justify-between flex-shrink-0 z-50">
+      {/* Enhanced Main Chat Area */}
+      <main className="flex-1 flex flex-col h-screen min-h-0 relative">
+        {/* Enhanced Header */}
+        <header className="bg-white/80 backdrop-blur-sm border-b border-blue-100/50 px-4 py-3 flex items-center justify-between flex-shrink-0 z-50">
           <div className="flex items-center gap-3">
             <button
               className="md:hidden bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-full p-2 transition-colors duration-200"
@@ -697,18 +878,20 @@ export default function Home() {
           </div>
         </header>
 
-        {/* Chat Messages */}
+        {/* Enhanced Chat Messages */}
         <div className="flex-1 overflow-y-auto bg-gradient-to-b from-blue-50/30 to-white px-4 py-6 min-h-0 pb-4">
           <div className="max-w-4xl mx-auto flex flex-col gap-4">
             {currentMessages.map((msg, idx) => (
               <div
                 key={idx}
-                className={`flex ${msg.sender === "user" ? "justify-end" : "justify-start"}`}
+                className={`group flex ${msg.sender === "user" ? "justify-end" : "justify-start"}`}
               >
                 <div
-                  className={`max-w-[85%] md:max-w-[70%] rounded-2xl px-4 py-3 shadow-sm ${
+                  className={`max-w-[85%] md:max-w-[70%] rounded-2xl px-4 py-3 shadow-sm relative ${
                     msg.sender === "user"
                       ? "bg-blue-600 text-white"
+                      : msg.isError
+                      ? "bg-red-50 border border-red-200 text-red-800"
                       : "bg-white border border-blue-100 text-gray-800"
                   }`}
                 >
@@ -716,6 +899,8 @@ export default function Home() {
                     <Image
                       src={msg.image}
                       alt="Uploaded"
+                      width={300}
+                      height={200}
                       className="max-w-full h-auto rounded-lg mb-2"
                     />
                   )}
@@ -745,6 +930,13 @@ export default function Home() {
                       msg.text
                     )}
                   </div>
+                  {msg.sender === "bot" && !typingMessages.has(msg.id || "") && (
+                    <MessageActions
+                      message={msg}
+                      onCopy={() => handleCopyMessage(msg.text)}
+                      onRegenerate={idx === currentMessages.length - 1 ? handleRegenerate : undefined}
+                    />
+                  )}
                 </div>
               </div>
             ))}
@@ -759,12 +951,13 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Input Area */}
+        {/* Enhanced Input Area */}
         <div className="bg-white/80 backdrop-blur-sm border-t border-blue-100/50 p-4 flex-shrink-0 z-20">
           <div className="max-w-4xl mx-auto">
             <form onSubmit={handleSend} className="flex gap-3">
               <div className="flex-1 relative">
                 <input
+                  ref={inputRef}
                   type="text"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
