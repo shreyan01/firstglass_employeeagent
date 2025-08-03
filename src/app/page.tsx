@@ -381,18 +381,25 @@ async function generateChatTitle(firstMessage: string): Promise<string> {
 // Database functions for user-thread mapping
 async function saveChatToDatabase(chat: ChatSession, userId: string) {
   try {
-          const { error: chatError } = await supabase
-        .from('chats')
-        .upsert({
-          id: chat.id,
-          user_id: userId,
-          title: chat.title,
-          created_at: new Date(chat.created).toISOString(),
-          updated_at: new Date(chat.updated).toISOString(),
-          thread_id: chat.threadId
-        });
+    console.log('Saving chat to database:', { chatId: chat.id, title: chat.title, userId });
+    
+    const { error: chatError } = await supabase
+      .from('chats')
+      .upsert({
+        id: chat.id,
+        user_id: userId,
+        title: chat.title,
+        created_at: new Date(chat.created).toISOString(),
+        updated_at: new Date(chat.updated).toISOString(),
+        thread_id: chat.threadId
+      });
 
-    if (chatError) throw chatError;
+    if (chatError) {
+      console.error('Supabase error saving chat:', chatError);
+      throw chatError;
+    }
+    
+    console.log('Successfully saved chat to database');
   } catch (error) {
     console.error('Error saving chat metadata to Supabase:', error);
     throw error;
@@ -416,6 +423,15 @@ async function loadUserChats(userId: string): Promise<ChatSession[]> {
         created: Date.now(),
         updated: Date.now(),
       };
+      
+      // Save the default chat to the database
+      try {
+        await saveChatToDatabase(defaultChat, userId);
+        console.log('Created and saved default chat to database');
+      } catch (error) {
+        console.error('Failed to save default chat:', error);
+      }
+      
       return [defaultChat];
     }
 
@@ -486,6 +502,9 @@ export default function Home() {
   const isCreatingMessage = useRef(false);
 
   const [lastUserMessage, setLastUserMessage] = useState<string>("");
+  const [dropdownOpen, setDropdownOpen] = useState<string | null>(null);
+  const [editingChatId, setEditingChatId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState<string>('');
 
   const activeChat = chats.find((c) => c.id === activeChatId)!;
 
@@ -509,6 +528,105 @@ export default function Home() {
       } catch (error) {
         console.error('Error saving new chat:', error);
       }
+    }
+  }, [user]);
+
+  // Delete chat function
+  const handleDeleteChat = useCallback(async (chatId: string) => {
+    if (!user) return;
+    
+    console.log('Attempting to delete chat:', { chatId, userId: user.id });
+    console.log('Current chats:', chats.map(c => ({ id: c.id, title: c.title })));
+    
+    try {
+      // Get the current session to get the access token
+      const { data: { session } } = await supabase.auth.getSession();
+      const accessToken = session?.access_token;
+      
+      if (!accessToken) {
+        console.error('No access token available');
+        alert('Authentication error. Please sign in again.');
+        return;
+      }
+      
+      const response = await fetch('/api/chatbot/delete-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chatId, userId: user.id, accessToken })
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        console.log('Delete response:', result);
+        
+        setChats(prev => prev.filter(chat => chat.id !== chatId));
+        
+        // If we're deleting the active chat, switch to the first available chat
+        if (chatId === activeChatId) {
+          const remainingChats = chats.filter(chat => chat.id !== chatId);
+          if (remainingChats.length > 0) {
+            setActiveChatId(remainingChats[0].id);
+          } else {
+            // Create a new chat if no chats remain
+            handleNewChat();
+          }
+        }
+        
+        setDropdownOpen(null);
+      } else {
+        const errorData = await response.json().catch(() => ({}));
+        console.error('Failed to delete chat:', response.status, errorData);
+        alert('Failed to delete chat. Please try again.');
+      }
+    } catch (error) {
+      console.error('Error deleting chat:', error);
+      alert('Error deleting chat. Please try again.');
+    }
+  }, [user, activeChatId, chats, handleNewChat]);
+
+  // Rename chat function
+  const handleRenameChat = useCallback(async (chatId: string, newTitle: string) => {
+    if (!user || !newTitle.trim()) return;
+    
+    console.log('Attempting to rename chat:', { chatId, userId: user.id, newTitle });
+    
+    try {
+      // Get the current session to get the access token
+      const { data: { session } } = await supabase.auth.getSession();
+      const accessToken = session?.access_token;
+      
+      if (!accessToken) {
+        console.error('No access token available');
+        alert('Authentication error. Please sign in again.');
+        return;
+      }
+      
+      const response = await fetch('/api/chatbot/rename-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chatId, userId: user.id, newTitle: newTitle.trim(), accessToken })
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        console.log('Rename response:', result);
+        
+        setChats(prev => prev.map(chat => 
+          chat.id === chatId 
+            ? { ...chat, title: newTitle.trim(), updated: Date.now() }
+            : chat
+        ));
+        setEditingChatId(null);
+        setEditingTitle('');
+        setDropdownOpen(null);
+      } else {
+        const errorData = await response.json().catch(() => ({}));
+        console.error('Failed to rename chat:', response.status, errorData);
+        alert('Failed to rename chat. Please try again.');
+      }
+    } catch (error) {
+      console.error('Error renaming chat:', error);
+      alert('Error renaming chat. Please try again.');
     }
   }, [user]);
 
@@ -541,7 +659,7 @@ export default function Home() {
     }
   }, [currentMessages]);
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts and click outside handlers
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Cmd/Ctrl + K for new chat
@@ -554,15 +672,44 @@ export default function Home() {
         e.preventDefault();
         inputRef.current?.focus();
       }
-      // Escape to close sidebar
-      if (e.key === 'Escape' && sidebarOpen) {
-        setSidebarOpen(false);
+      // Escape to close sidebar or dropdown
+      if (e.key === 'Escape') {
+        if (sidebarOpen) {
+          setSidebarOpen(false);
+        }
+        if (dropdownOpen) {
+          setDropdownOpen(null);
+        }
+        if (editingChatId) {
+          setEditingChatId(null);
+          setEditingTitle('');
+        }
+      }
+    };
+
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as Element;
+      
+      // Close dropdown if clicking outside the dropdown or chat container
+      if (dropdownOpen && !target.closest('.group\\/chat') && !target.closest('[data-dropdown]')) {
+        setDropdownOpen(null);
+      }
+      
+      // Close editing if clicking outside
+      if (editingChatId && !target.closest('.group\\/chat')) {
+        setEditingChatId(null);
+        setEditingTitle('');
       }
     };
 
     document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [sidebarOpen, handleNewChat]);
+    document.addEventListener('click', handleClickOutside);
+    
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('click', handleClickOutside);
+    };
+  }, [sidebarOpen, dropdownOpen, editingChatId, handleNewChat]);
 
   // Enhanced message sending with better error handling
   async function handleSend(e: React.FormEvent) {
@@ -801,6 +948,7 @@ export default function Home() {
   useEffect(() => {
     if (user) {
       loadUserChats(user.id).then(loadedChats => {
+        console.log('Loaded chats from database:', loadedChats.map(c => ({ id: c.id, title: c.title })));
         setChats(loadedChats);
         if (loadedChats.length > 0) {
           setActiveChatId(loadedChats[0].id);
@@ -875,16 +1023,96 @@ export default function Home() {
         </div>
         <div className="flex-1 overflow-y-auto px-2 py-2">
           {chats.map((chat) => (
-            <button
+            <div
               key={chat.id}
-              className={`w-full text-left px-3 py-3 border border-transparent hover:border-blue-200 hover:bg-blue-50/50 transition-all duration-200 flex flex-col rounded-xl mb-2 group ${
+              className={`relative group/chat w-full px-3 py-3 border border-transparent hover:border-blue-200 hover:bg-blue-50/50 transition-all duration-200 rounded-xl mb-2 ${
                 chat.id === activeChatId ? 'bg-blue-100/70 border-blue-200 shadow-sm' : ''
               }`}
-              onClick={() => { setActiveChatId(chat.id); setSidebarOpen(false); }}
             >
-              <span className="font-medium text-blue-900 truncate text-sm">{chat.title}</span>
-              <span className="text-xs text-blue-400 mt-1">{formatDate(chat.updated)}</span>
-            </button>
+              {/* Chat content */}
+              <div className="flex items-center justify-between">
+                <button
+                  className="flex-1 text-left flex flex-col"
+                  onClick={() => { setActiveChatId(chat.id); setSidebarOpen(false); }}
+                >
+                  {editingChatId === chat.id ? (
+                    <input
+                      type="text"
+                      value={editingTitle}
+                      onChange={(e) => setEditingTitle(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          handleRenameChat(chat.id, editingTitle);
+                        } else if (e.key === 'Escape') {
+                          setEditingChatId(null);
+                          setEditingTitle('');
+                        }
+                      }}
+                      onBlur={() => {
+                        if (editingTitle.trim()) {
+                          handleRenameChat(chat.id, editingTitle);
+                        } else {
+                          setEditingChatId(null);
+                          setEditingTitle('');
+                        }
+                      }}
+                      className="font-medium text-blue-900 text-sm bg-transparent border-none outline-none focus:ring-0"
+                      autoFocus
+                    />
+                  ) : (
+                    <span className="font-medium text-blue-900 truncate text-sm">{chat.title}</span>
+                  )}
+                  <span className="text-xs text-blue-400 mt-1">{formatDate(chat.updated)}</span>
+                </button>
+                
+                {/* Three dots button - always show on hover */}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setDropdownOpen(dropdownOpen === chat.id ? null : chat.id);
+                  }}
+                  className="opacity-0 group-hover/chat:opacity-100 transition-opacity duration-200 p-1 hover:bg-blue-200 rounded-full"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4 text-blue-600">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Dropdown menu */}
+              {dropdownOpen === chat.id && (
+                <div data-dropdown className="absolute right-0 top-full mt-1 bg-white border border-blue-200 rounded-lg shadow-lg z-50 min-w-[120px]">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setEditingChatId(chat.id);
+                      setEditingTitle(chat.title);
+                      setDropdownOpen(null);
+                    }}
+                    className="w-full text-left px-3 py-2 text-sm text-blue-700 hover:bg-blue-50 flex items-center gap-2"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+                    </svg>
+                    Rename
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (confirm('Are you sure you want to delete this chat? This action cannot be undone.')) {
+                        handleDeleteChat(chat.id);
+                      }
+                    }}
+                    className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+                    </svg>
+                    Delete
+                  </button>
+                </div>
+              )}
+            </div>
           ))}
         </div>
         <div className="hidden lg:block p-4 border-t border-blue-100/50 text-xs text-blue-400">
